@@ -182,7 +182,7 @@ class Trader:
                 return []
 
         skew = ACO_SKEW
-        ts_remaining = 1000000 - state.timestamp
+        ts_remaining = 100000 - state.timestamp
         if ts_remaining < 2000:
             skew = ACO_SKEW * (2000.0 / max(ts_remaining, 1))
 
@@ -254,10 +254,10 @@ class Trader:
         else:
             raw_target = IPR_MAX_TARGET * (20 + corr) / 10.0
 
-        ramp = min(ticks_seen / 20.0, 1.0)
+        ramp = min(ticks_seen / 80.0, 1.0)
         raw_target *= ramp
 
-        ts_remaining = 1000000 - ts
+        ts_remaining = 100000 - ts
         if ts_remaining < 2000:
             raw_target *= ts_remaining / 2000.0
 
