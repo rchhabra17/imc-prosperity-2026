@@ -111,15 +111,23 @@ class Trader:
         fair: float, limit: int,
         take_edge: float, q_off: float, q_sz: int,
         l2_off: float, l2_sz: int,
+        confidence: float = 1.0,
     ):
 
         orders: List[Order] = []
         buy_cap  = limit - pos
         sell_cap = limit + pos
 
+        conf = max(0.0, min(1.0, confidence))
+        eff_q_off  = q_off + (1 - conf) * 2
+        eff_l2_off = l2_off + (1 - conf) * 2
+        eff_q_sz   = max(1, int(q_sz * conf))
+        eff_l2_sz  = max(1, int(l2_sz * conf))
+        eff_take   = take_edge + (1 - conf) * 2
+
         # --- TAKE: sweep mispriced resting orders ---------------
         for px in sorted(od.sell_orders.keys()):
-            if px > fair - take_edge or buy_cap <= 0:
+            if px > fair - eff_take or buy_cap <= 0:
                 break
             vol = -od.sell_orders[px]
             qty = min(vol, buy_cap)
@@ -128,7 +136,7 @@ class Trader:
                 buy_cap -= qty
 
         for px in sorted(od.buy_orders.keys(), reverse=True):
-            if px < fair + take_edge or sell_cap <= 0:
+            if px < fair + eff_take or sell_cap <= 0:
                 break
             vol = od.buy_orders[px]
             qty = min(vol, sell_cap)
@@ -137,10 +145,10 @@ class Trader:
                 sell_cap -= qty
 
         # --- QUOTE: passive layer 1 ----------------------------
-        bid_px = math.floor(fair - q_off)
-        ask_px = math.ceil(fair + q_off)
-        bid_sz = min(q_sz, buy_cap)
-        ask_sz = min(q_sz, sell_cap)
+        bid_px = math.floor(fair - eff_q_off)
+        ask_px = math.ceil(fair + eff_q_off)
+        bid_sz = min(eff_q_sz, buy_cap)
+        ask_sz = min(eff_q_sz, sell_cap)
         if bid_sz > 0:
             orders.append(Order(symbol, bid_px, bid_sz))
             buy_cap -= bid_sz
@@ -149,11 +157,11 @@ class Trader:
             sell_cap -= ask_sz
 
         # --- QUOTE: passive layer 2 ----------------------------
-        if l2_off > 0 and l2_sz > 0:
-            bid2_px = math.floor(fair - l2_off)
-            ask2_px = math.ceil(fair + l2_off)
-            bid2_sz = min(l2_sz, buy_cap)
-            ask2_sz = min(l2_sz, sell_cap)
+        if eff_l2_off > 0 and eff_l2_sz > 0:
+            bid2_px = math.floor(fair - eff_l2_off)
+            ask2_px = math.ceil(fair + eff_l2_off)
+            bid2_sz = min(eff_l2_sz, buy_cap)
+            ask2_sz = min(eff_l2_sz, sell_cap)
             if bid2_sz > 0:
                 orders.append(Order(symbol, bid2_px, bid2_sz))
                 buy_cap -= bid2_sz
@@ -173,25 +181,30 @@ class Trader:
         alpha = 2.0 / (ACO_EWMA_SPAN + 1)
         prev  = data.get("aco_ewma")
 
+        aco_ticks = data.get("aco_ticks", 0)
         if mid is not None:
             ewma = mid if prev is None else alpha * mid + (1 - alpha) * prev
             data["aco_ewma"] = ewma
+            aco_ticks += 1
+            data["aco_ticks"] = aco_ticks
         else:
             ewma = prev
             if ewma is None:
                 return []
 
         skew = ACO_SKEW
-        ts_remaining = 100000 - state.timestamp
+        ts_remaining = 1000000 - state.timestamp
         if ts_remaining < 2000:
             skew = ACO_SKEW * (2000.0 / max(ts_remaining, 1))
 
         fair = ewma - skew * pos
 
+        aco_conf = min(aco_ticks / 20.0, 1.0)
         orders, buy_cap, sell_cap = self._build_orders(
             ACO, od, pos, fair, ACO_LIMIT,
             ACO_TAKE_EDGE, ACO_QUOTE_OFFSET, ACO_QUOTE_SIZE,
             ACO_L2_OFFSET, ACO_L2_SIZE,
+            confidence=aco_conf,
         )
 
         # --- LAYER 3: wall-aware quotes -----------------------
@@ -254,10 +267,10 @@ class Trader:
         else:
             raw_target = IPR_MAX_TARGET * (20 + corr) / 10.0
 
-        ramp = min(ticks_seen / 80.0, 1.0)
+        ramp = min(ticks_seen / 20.0, 1.0)
         raw_target *= ramp
 
-        ts_remaining = 100000 - ts
+        ts_remaining = 1000000 - ts
         if ts_remaining < 2000:
             raw_target *= ts_remaining / 2000.0
 
@@ -306,10 +319,13 @@ class Trader:
         adj_pos = pos - inv_target
         fair    = fair_raw - IPR_SKEW * adj_pos
 
+        ipr_ticks = len(data.get("ipr_mids", []))
+        ipr_conf = min(ipr_ticks / 20.0, 1.0)
         orders, _, _ = self._build_orders(
             IPR, od, pos, fair, IPR_LIMIT,
             IPR_TAKE_EDGE, IPR_QUOTE_OFFSET, IPR_QUOTE_SIZE,
             IPR_L2_OFFSET, IPR_L2_SIZE,
+            confidence=ipr_conf,
         )
 
         return orders
