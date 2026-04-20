@@ -11,14 +11,14 @@ import math
 ACO              = "ASH_COATED_OSMIUM"
 ACO_LIMIT        = 80
 
-ACO_EWMA_SPAN    = 21      # higher = smoother fair estimate
+ACO_EWMA_SPAN    = 15      # higher = smoother fair estimate
 ACO_TAKE_EDGE    = 0       # min ticks of edge to aggress
 ACO_QUOTE_OFFSET = 1       # primary quote distance from fair
-ACO_QUOTE_SIZE   = 25      # primary quote size per side
+ACO_QUOTE_SIZE   = 20      # primary quote size per side
 ACO_L2_OFFSET    = 3       # 2nd-layer quote distance
-ACO_L2_SIZE      = 15      # 2nd-layer quote size per side
+ACO_L2_SIZE      = 10      # 2nd-layer quote size per side
 ACO_WALL_SIZE    = 0       # 3rd-layer: quote 1 inside detected wall
-ACO_SKEW         = 0.10    # fair shifts by  -SKEW * position
+ACO_SKEW         = 0.20    # fair shifts by  -SKEW * position
 
 # --- INTARIAN_PEPPER_ROOT (linear ramp) ----------------------
 IPR              = "INTARIAN_PEPPER_ROOT"
@@ -26,7 +26,7 @@ IPR_LIMIT        = 80
 
 IPR_SLOPE        = 0.001   # expected price increase per ts unit
 IPR_CORR_ALPHA   = 0.20    # EWMA smoothing for residual correction
-IPR_TAKE_EDGE    = 1       # min ticks of edge to aggress
+IPR_TAKE_EDGE    = 0       # min ticks of edge to aggress
 IPR_QUOTE_OFFSET = 1       # primary quote distance from fair
 IPR_QUOTE_SIZE   = 28      # primary quote size per side
 IPR_L2_OFFSET    = 4       # 2nd-layer distance
@@ -34,7 +34,7 @@ IPR_L2_SIZE      = 16      # 2nd-layer size per side
 IPR_SKEW         = 0.25    # inventory-flattening coefficient
 
 # --- ADAPTIVE TARGET PARAMS ----------------------------------
-IPR_MAX_TARGET   = 65      # max long inventory when trend is strong
+IPR_MAX_TARGET   = 75      # max long inventory when trend is strong
 IPR_SLOPE_WINDOW = 30      # ticks of mid history to estimate slope
 IPR_SLOPE_THRESH = 0.0003  # below this slope, target trends toward 0
 
@@ -53,7 +53,7 @@ class Trader:
         2,500 is a Level-2 strategic bid designed to beat the median
         without severely impacting net PnL.
         """
-        return 2500
+        return 1500
 
     # ---- state persistence -----------------------------------
 
@@ -87,7 +87,7 @@ class Trader:
                     cp = trade.buyer
                 
                 # Keep a running tally of absolute volume traded against each ID
-                if cp and cp != "SUBMISSION":
+                if cp not in ("", "SUBMISSION"):
                     current_vol = data["counterparty_volume"].get(cp, 0)
                     data["counterparty_volume"][cp] = current_vol + abs(trade.quantity)
         
@@ -181,7 +181,12 @@ class Trader:
             if ewma is None:
                 return []
 
-        fair = ewma - ACO_SKEW * pos
+        skew = ACO_SKEW
+        ts_remaining = 1000000 - state.timestamp
+        if ts_remaining < 2000:
+            skew = ACO_SKEW * (2000.0 / max(ts_remaining, 1))
+
+        fair = ewma - skew * pos
 
         orders, buy_cap, sell_cap = self._build_orders(
             ACO, od, pos, fair, ACO_LIMIT,
@@ -238,14 +243,25 @@ class Trader:
         slope_per_ts = slope_per_tick / 100.0
         return slope_per_ts
 
-    def _adaptive_target(self, data: dict) -> float:
+    def _adaptive_target(self, data: dict, ts: int = 0) -> float:
         corr = data.get("ipr_corr", 0.0)
+        ticks_seen = len(data.get("ipr_mids", []))
+
         if corr > -10:
-            return float(IPR_MAX_TARGET)
+            raw_target = float(IPR_MAX_TARGET)
         elif corr < -20:
-            return 0.0
+            raw_target = 0.0
         else:
-            return IPR_MAX_TARGET * (20 + corr) / 10.0
+            raw_target = IPR_MAX_TARGET * (20 + corr) / 10.0
+
+        ramp = min(ticks_seen / 20.0, 1.0)
+        raw_target *= ramp
+
+        ts_remaining = 1000000 - ts
+        if ts_remaining < 2000:
+            raw_target *= ts_remaining / 2000.0
+
+        return raw_target
 
     # ---- IPR strategy ----------------------------------------
 
@@ -272,7 +288,7 @@ class Trader:
                 data["ipr_mids"] = data["ipr_mids"][-max_hist:]
 
         # --- estimate slope and adapt target -------------------
-        inv_target = self._adaptive_target(data)
+        inv_target = self._adaptive_target(data, ts)
         data["ipr_target"] = inv_target
 
         # --- analytical fair value + correction ----------------
